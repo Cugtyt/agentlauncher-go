@@ -88,11 +88,8 @@ func Subscribe[T Event](eb *EventBus, handler func(context.Context, T)) {
 }
 
 func (eb *EventBus) Emit(event Event) {
-	select {
-	case eb.eventQueue <- event:
-		eb.log(event)
-	default:
-	}
+	eb.eventQueue <- event
+	eb.log(event)
 }
 
 func (eb *EventBus) dispatcher() {
@@ -116,10 +113,7 @@ func (eb *EventBus) dispatchEvent(event Event) {
 	handlers := eb.handlerMap[eventType]
 
 	for _, handler := range handlers {
-		select {
-		case eb.workerPool <- work{event: event, handler: handler}:
-		default:
-		}
+		eb.workerPool <- work{event: event, handler: handler}
 	}
 }
 
@@ -129,7 +123,7 @@ func (eb *EventBus) worker() {
 	for {
 		select {
 		case w := <-eb.workerPool:
-			go w.handler.Call(eb.ctx, w.event)
+			w.handler.Call(eb.ctx, w.event)
 
 		case <-eb.ctx.Done():
 			return

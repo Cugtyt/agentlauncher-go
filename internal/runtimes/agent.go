@@ -10,7 +10,7 @@ import (
 type AgentRuntime struct {
 	Agents   map[string]*Agent `json:"agents"`
 	eventBus *eventbus.EventBus
-	mu       sync.Mutex
+	mu       sync.RWMutex
 }
 
 func NewAgentRuntime(eb *eventbus.EventBus) *AgentRuntime {
