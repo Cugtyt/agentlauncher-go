@@ -36,6 +36,7 @@ func NewToolRuntime(eventBus *eventbus.EventBus) *ToolRuntime {
 	eventbus.Subscribe(eventBus, toolRuntime.handleToolsExecRequest)
 	eventbus.Subscribe(eventBus, toolRuntime.HandleAgentFinishEvent)
 	eventbus.Subscribe(eventBus, toolRuntime.HandleToolRuntimeErrorEvent)
+	eventbus.Subscribe(eventBus, toolRuntime.HandleAgentLauncherShutdownEvent)
 	return toolRuntime
 }
 
@@ -415,4 +416,13 @@ func (tr *ToolRuntime) HandleToolRuntimeErrorEvent(ctx context.Context, event ev
 		AgentID:     event.AgentID,
 		ToolResults: []events.ToolResult{},
 	})
+}
+
+func (tr *ToolRuntime) HandleAgentLauncherShutdownEvent(ctx context.Context, event events.AgentLauncherShutdownEvent) {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	for agentID, ch := range tr.subAgentResults {
+		close(ch)
+		delete(tr.subAgentResults, agentID)
+	}
 }

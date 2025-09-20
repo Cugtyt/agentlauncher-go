@@ -108,6 +108,7 @@ func (al *AgentLauncher) Run(task string, history []llminterface.Message) string
 	select {
 	case result := <-al.finalResults[agentID]:
 		al.mu.Lock()
+		close(al.finalResults[agentID])
 		delete(al.finalResults, agentID)
 		al.mu.Unlock()
 		return result
@@ -117,5 +118,11 @@ func (al *AgentLauncher) Run(task string, history []llminterface.Message) string
 }
 
 func (al *AgentLauncher) Close() {
+	al.mu.Lock()
+	defer al.mu.Unlock()
+
+	for _, ch := range al.finalResults {
+		close(ch)
+	}
 	al.eventBus.Shutdown(context.Background())
 }
