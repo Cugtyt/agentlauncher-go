@@ -1,8 +1,17 @@
 package runtimes
 
+import (
+	"fmt"
+	"strconv"
+	"strings"
+
+	"github.com/google/uuid"
+)
+
 const (
-	AGENT_0_NAME          string = "agent-0"
-	AGENT_0_SYSTEM_PROMPT string = `Your primary role is to wisely delegate tasks
+	PRIMARY_AGENT_PREFIX        string = "agent"
+	CREATE_SUB_AGENT_TOOL_NAME  string = "create_sub_agent"
+	PRIMARY_AGENT_SYSTEM_PROMPT string = `Your primary role is to wisely delegate tasks
 by creating sub-agents whenever a task requires multiple steps or tools.
 Try to avoid creating sub-agents for tasks that only require a single step.
 Direct execution is 10x more costly than delegation and increases the workload.
@@ -24,3 +33,30 @@ Describe your efficient delegation strategy before creating sub-agents.
 Organize results for easy understanding, you don't need to report how you delegated.
 `
 )
+
+func GeneratePrimaryAgentID(index int) string {
+	return fmt.Sprintf("%s%d", PRIMARY_AGENT_PREFIX, index)
+}
+
+func GenerateSubAgentID(primaryAgentID string) string {
+	return fmt.Sprintf("%s_%s", primaryAgentID, uuid.New().String())
+}
+
+func GetPrimaryAgentIDFromSubAgentID(subAgentID string) (string, error) {
+	var primaryAgentID string
+	n, err := fmt.Sscanf(subAgentID, PRIMARY_AGENT_PREFIX+"%d_", &primaryAgentID)
+	if n != 1 || err != nil {
+		return "", fmt.Errorf("invalid sub-agent ID format")
+	}
+	return primaryAgentID, nil
+}
+
+func IsPrimaryAgent(agentID string) bool {
+    if !strings.HasPrefix(agentID, PRIMARY_AGENT_PREFIX) {
+        return false
+    }
+    
+    suffix := agentID[len(PRIMARY_AGENT_PREFIX):]
+    index, err := strconv.Atoi(suffix)
+    return err == nil && index >= 0
+}

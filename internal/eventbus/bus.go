@@ -2,11 +2,10 @@ package eventbus
 
 import (
 	"context"
-	"fmt"
+	"log"
 	"reflect"
 	"runtime"
 	"sync"
-	"time"
 )
 
 type VerboseLevel int
@@ -48,6 +47,7 @@ type EventBus struct {
 	wg         sync.WaitGroup
 
 	verbose VerboseLevel
+	logger  *log.Logger
 }
 
 func NewEventBus() *EventBus {
@@ -62,6 +62,8 @@ func NewEventBus() *EventBus {
 		numWorkers: numWorkers,
 		ctx:        ctx,
 		cancel:     cancel,
+		verbose:    SILENT,
+		logger:     log.New(log.Writer(), "EventBus: ", log.LstdFlags),
 	}
 
 	eb.wg.Add(1)
@@ -164,8 +166,6 @@ func (eb *EventBus) log(event Event) {
 		return
 	}
 
-	timestamp := time.Now().Format("2006-01-02 15:04:05.000")
-
 	agentID := ""
 	val := reflect.ValueOf(event)
 	field := val.FieldByName("AgentID")
@@ -176,19 +176,11 @@ func (eb *EventBus) log(event Event) {
 	eventType := reflect.TypeOf(event).Name()
 
 	if eb.verbose == BASIC {
-		if agentID != "" {
-			fmt.Printf("[%s][%s] Event emitted: %s\n", timestamp, agentID, eventType)
-		} else {
-			fmt.Printf("[%s] Event emitted: %s\n", timestamp, eventType)
-		}
+		eb.logger.Printf("[%s] Event emitted: %s", agentID, eventType)
 		return
 	}
 
-	header := fmt.Sprintf("----- [%s] Event emitted: %s -----", timestamp, eventType)
-	if agentID != "" {
-		header = fmt.Sprintf("----- [%s][%s] Event emitted: %s -----", timestamp, agentID, eventType)
-	}
-	fmt.Println(header)
-	fmt.Printf("%+v\n", event)
-	fmt.Println("-------------------------")
+	eb.logger.Printf("----- Event emitted: %s -----", eventType)
+	eb.logger.Printf("%+v\n", event)
+	eb.logger.Println("-------------------------")
 }

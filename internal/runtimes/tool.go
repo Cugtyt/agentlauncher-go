@@ -5,13 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"sync"
 	"time"
 
 	"agentlauncher/internal/eventbus"
 	"agentlauncher/internal/events"
 	"agentlauncher/internal/llminterface"
-
-	"github.com/google/uuid"
 )
 
 type Tool struct {
@@ -20,28 +19,33 @@ type Tool struct {
 }
 
 type ToolRuntime struct {
-	eventBus *eventbus.EventBus
-	tools    map[string]*Tool
+	eventBus        *eventbus.EventBus
+	tools           map[string]*Tool
+	subAgentTool    bool
+	subAgentResults map[string]chan string
+	mu              sync.RWMutex
 }
 
 func NewToolRuntime(eventBus *eventbus.EventBus) *ToolRuntime {
 	toolRuntime := &ToolRuntime{
-		eventBus: eventBus,
-		tools:    make(map[string]*Tool),
+		eventBus:        eventBus,
+		tools:           make(map[string]*Tool),
+		subAgentTool:    true,
+		subAgentResults: make(map[string]chan string),
 	}
 	eventbus.Subscribe(eventBus, toolRuntime.handleToolsExecRequest)
+	eventbus.Subscribe(eventBus, toolRuntime.HandleAgentFinishEvent)
+	eventbus.Subscribe(eventBus, toolRuntime.HandleToolRuntimeErrorEvent)
 	return toolRuntime
+}
+
+func (tr *ToolRuntime) DisableSubAgentTool() {
+	tr.subAgentTool = false
 }
 
 func (tr *ToolRuntime) Register(name, description string, fn any, params []llminterface.ToolParamSchema) {
 	if !isValidToolFunction(fn) {
 		panic(fmt.Sprintf("invalid tool function signature for %s", name))
-	}
-
-	fnType := reflect.TypeOf(fn)
-	expectedParams := fnType.NumIn() - 1
-	if len(params) != expectedParams {
-		panic(fmt.Sprintf("tool '%s' expects %d parameters but got %d", name, expectedParams, len(params)))
 	}
 
 	tool := &Tool{
@@ -54,6 +58,9 @@ func (tr *ToolRuntime) Register(name, description string, fn any, params []llmin
 	}
 
 	if _, exists := tr.tools[name]; exists {
+		if name == CREATE_SUB_AGENT_TOOL_NAME {
+			return
+		}
 		panic(fmt.Sprintf("tool '%s' is already registered", name))
 	}
 
@@ -153,6 +160,9 @@ func (tr *ToolRuntime) toolExec(ctx context.Context, toolName string, arguments 
 		return "", err
 	}
 
+	if toolName == CREATE_SUB_AGENT_TOOL_NAME {
+		arguments["agentID"] = agentID
+	}
 	result, err := tr.executeToolFunction(ctx, tool, arguments)
 
 	if err != nil {
@@ -174,17 +184,24 @@ func (tr *ToolRuntime) executeToolFunction(ctx context.Context, tool *Tool, argu
 	fnValue := reflect.ValueOf(tool.Function)
 	fnType := reflect.TypeOf(tool.Function)
 
+	toolParameters := tool.Parameters
 	expectedArgs := fnType.NumIn() - 1 // Exclude context
-	if len(tool.Parameters) != expectedArgs {
-		return "", fmt.Errorf("tool schema mismatch: expected %d parameters, schema has %d", expectedArgs, len(tool.Parameters))
+	if tool.Name == CREATE_SUB_AGENT_TOOL_NAME {
+		toolParameters = append(toolParameters, llminterface.ToolParamSchema{
+			Type: "string",
+			Name: "agentID",
+		})
+	}
+	if len(toolParameters) != expectedArgs {
+		return "", fmt.Errorf("tool schema mismatch: expected %d parameters, schema has %d", expectedArgs, len(toolParameters))
 	}
 
 	args := make([]reflect.Value, fnType.NumIn())
 	args[0] = reflect.ValueOf(ctx)
 
 	// Map arguments using parameter names from the schema
-	for i := 0; i < len(tool.Parameters); i++ {
-		paramSchema := tool.Parameters[i]
+	for i := 0; i < len(toolParameters); i++ {
+		paramSchema := toolParameters[i]
 		paramType := fnType.In(i + 1) // +1 to skip context
 
 		argValue, exists := arguments[paramSchema.Name]
@@ -266,7 +283,6 @@ func (tr *ToolRuntime) convertArgument(value interface{}, targetType reflect.Typ
 			return sliceValue, nil
 		}
 	}
-	
 
 	return reflect.Value{}, fmt.Errorf("cannot convert %T to %v", value, targetType)
 }
@@ -286,8 +302,8 @@ func (tr *ToolRuntime) resultToString(result any) (string, error) {
 	}
 }
 
-func (tr *ToolRuntime) Setup() {
-	tr.Register("create_sub_agent",
+func (tr *ToolRuntime) SetupSubAgentTool() {
+	tr.Register(CREATE_SUB_AGENT_TOOL_NAME,
 		"Create a sub-agent to handle a specific task",
 		tr.createSubAgentTool,
 		[]llminterface.ToolParamSchema{
@@ -309,22 +325,15 @@ func (tr *ToolRuntime) Setup() {
 		})
 }
 
-func (tr *ToolRuntime) createSubAgentTool(ctx context.Context, task string, toolNameList []string) (string, error) {
-	agentID := uuid.New().String()
-	resultChan := make(chan string, 1)
+func (tr *ToolRuntime) createSubAgentTool(ctx context.Context, task string, toolNameList []string, agentID string) (string, error) {
+	subAgentID := GenerateSubAgentID(agentID)
 
-	eventbus.Subscribe(tr.eventBus, func(eventCtx context.Context, event events.AgentFinishEvent) {
-		if event.AgentID == agentID {
-			select {
-			case resultChan <- event.Result:
-			default:
-			}
-			close(resultChan)
-		}
-	})
-
+	tr.mu.Lock()
+	tr.subAgentResults[subAgentID] = make(chan string, 1)
+	resultChan := tr.subAgentResults[subAgentID]
+	tr.mu.Unlock()
 	tr.eventBus.Emit(events.AgentCreateEvent{
-		AgentID:     agentID,
+		AgentID:     subAgentID,
 		Task:        task,
 		ToolSchemas: tr.getToolSchemas(toolNameList),
 	})
@@ -382,4 +391,28 @@ func (tr *ToolRuntime) GetToolNames() []string {
 		names = append(names, name)
 	}
 	return names
+}
+
+func (tr *ToolRuntime) HandleAgentFinishEvent(ctx context.Context, event events.AgentFinishEvent) {
+	if IsPrimaryAgent(event.AgentID) {
+		return
+	}
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	if _, exists := tr.subAgentResults[event.AgentID]; !exists {
+		panic("sub-agent result channel for " + event.AgentID + " does not exist")
+	}
+	select {
+	case tr.subAgentResults[event.AgentID] <- event.Result:
+	default:
+	}
+	close(tr.subAgentResults[event.AgentID])
+	delete(tr.subAgentResults, event.AgentID)
+}
+
+func (tr *ToolRuntime) HandleToolRuntimeErrorEvent(ctx context.Context, event events.ToolRuntimeErrorEvent) {
+	tr.eventBus.Emit(events.ToolsExecResultsEvent{
+		AgentID:     event.AgentID,
+		ToolResults: []events.ToolResult{},
+	})
 }

@@ -26,7 +26,7 @@ func NewLLMRuntime(eventBus *eventbus.EventBus, mainAgentHandler llminterface.LL
 
 func (r *LLMRuntime) HandleLLMRequestEvent(ctx context.Context, event events.LLMRequestEvent) {
 	var handler llminterface.LLMHandler
-	if event.AgentID == AGENT_0_NAME {
+	if IsPrimaryAgent(event.AgentID) {
 		handler = r.main_agent_llm_handler
 	} else {
 		handler = r.sub_agent_llm_handler

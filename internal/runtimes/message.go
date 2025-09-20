@@ -5,26 +5,30 @@ import (
 	"agentlauncher/internal/events"
 	"agentlauncher/internal/llminterface"
 	"context"
+	"sync"
 )
 
 type MessageRuntime struct {
-	History                  []llminterface.Message `json:"history"`
+	History                  map[string][]llminterface.Message `json:"history"`
 	eventBus                 *eventbus.EventBus
 	response_message_handler func(llminterface.ResponseMessageList) llminterface.ResponseMessageList
 	conversation_handler     func(llminterface.MessageList) llminterface.MessageList
+	mu                       sync.RWMutex
 }
 
 func NewMessageRuntime(
 	eventBus *eventbus.EventBus,
 ) *MessageRuntime {
 	messageRuntime := &MessageRuntime{
-		History:  []llminterface.Message{},
+		History:  make(map[string][]llminterface.Message),
 		eventBus: eventBus,
 	}
 	eventbus.Subscribe(eventBus, messageRuntime.HandleLLMResponseEvent)
 	eventbus.Subscribe(eventBus, messageRuntime.HandleTaskCreateEvent)
 	eventbus.Subscribe(eventBus, messageRuntime.HandleToolsExecResults)
 	eventbus.Subscribe(eventBus, messageRuntime.HandleMessagesAddEvent)
+	eventbus.Subscribe(eventBus, messageRuntime.HandleAgentLauncherShutdownEvent)
+	eventbus.Subscribe(eventBus, messageRuntime.HandleTaskFinishEvent)
 	return messageRuntime
 }
 
@@ -39,7 +43,7 @@ func (r *MessageRuntime) WithConversationHandler(handler func(llminterface.Messa
 }
 
 func (r *MessageRuntime) HandleLLMResponseEvent(ctx context.Context, e events.LLMResponseEvent) {
-	if e.AgentID != AGENT_0_NAME {
+	if !IsPrimaryAgent(e.AgentID) {
 		return
 	}
 
@@ -48,7 +52,12 @@ func (r *MessageRuntime) HandleLLMResponseEvent(ctx context.Context, e events.LL
 		responseMessages = r.response_message_handler(e.Response)
 	}
 
-	r.History = append(r.History, responseMessages...)
+	r.mu.Lock()
+	if _, exists := r.History[e.AgentID]; !exists {
+		panic("History for primary agent " + e.AgentID + " does not exist")
+	}
+	r.History[e.AgentID] = append(r.History[e.AgentID], responseMessages...)
+	r.mu.Unlock()
 	r.eventBus.Emit(events.MessagesAddEvent{
 		Messages: llminterface.MessageList(responseMessages),
 		AgentID:  e.AgentID,
@@ -56,22 +65,38 @@ func (r *MessageRuntime) HandleLLMResponseEvent(ctx context.Context, e events.LL
 }
 
 func (r *MessageRuntime) HandleTaskCreateEvent(ctx context.Context, e events.TaskCreateEvent) {
-	r.History = append(r.History, llminterface.UserMessage{Content: e.Task})
+	if !IsPrimaryAgent(e.AgentID) {
+		return
+	}
+	r.mu.Lock()
+	if _, exists := r.History[e.AgentID]; !exists {
+		r.History[e.AgentID] = []llminterface.Message{}
+	}
+	if e.Conversation != nil {
+		r.History[e.AgentID] = append(r.History[e.AgentID], e.Conversation...)
+	}
+	r.History[e.AgentID] = append(r.History[e.AgentID], llminterface.UserMessage{Content: e.Task})
+	r.mu.Unlock()
 	r.eventBus.Emit(events.MessagesAddEvent{
 		Messages: llminterface.MessageList{llminterface.UserMessage{Content: e.Task}},
-		AgentID:  AGENT_0_NAME,
+		AgentID:  e.AgentID,
 	})
 }
 
 func (r *MessageRuntime) HandleToolsExecResults(ctx context.Context, e events.ToolsExecResultsEvent) {
-	if e.AgentID != AGENT_0_NAME {
+	if !IsPrimaryAgent(e.AgentID) {
 		return
 	}
 	toolMessages := []llminterface.Message{}
 	for _, result := range e.ToolResults {
 		toolMessages = append(toolMessages, llminterface.ToolResultMessage{ToolCallID: result.ToolCallID, ToolName: result.ToolName, Result: result.Result})
 	}
-	r.History = append(r.History, toolMessages...)
+	r.mu.Lock()
+	if _, exists := r.History[e.AgentID]; !exists {
+		panic("History for primary agent " + e.AgentID + " does not exist")
+	}
+	r.History[e.AgentID] = append(r.History[e.AgentID], toolMessages...)
+	r.mu.Unlock()
 	r.eventBus.Emit(events.MessagesAddEvent{
 		Messages: toolMessages,
 		AgentID:  e.AgentID,
@@ -79,7 +104,37 @@ func (r *MessageRuntime) HandleToolsExecResults(ctx context.Context, e events.To
 }
 
 func (r *MessageRuntime) HandleMessagesAddEvent(ctx context.Context, e events.MessagesAddEvent) {
-	if e.AgentID == AGENT_0_NAME && r.conversation_handler != nil {
-		r.History = r.conversation_handler(r.History)
+	if !IsPrimaryAgent(e.AgentID) {
+		return
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.History[e.AgentID]; !exists {
+		panic("History for primary agent " + e.AgentID + " does not exist")
+	}
+	r.History[e.AgentID] = append(r.History[e.AgentID], e.Messages...)
+}
+
+func (r *MessageRuntime) HandleAgentLauncherShutdownEvent(ctx context.Context, e events.AgentLauncherShutdownEvent) {
+	if !IsPrimaryAgent(e.AgentID) {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.History[e.AgentID]; !exists {
+		panic("History for primary agent " + e.AgentID + " does not exist")
+	}
+	delete(r.History, e.AgentID)
+}
+
+func (r *MessageRuntime) HandleTaskFinishEvent(ctx context.Context, e events.TaskFinishEvent) {
+	if !IsPrimaryAgent(e.AgentID) {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.History[e.AgentID]; !exists {
+		panic("History for primary agent " + e.AgentID + " does not exist")
+	}
+	delete(r.History, e.AgentID)
 }

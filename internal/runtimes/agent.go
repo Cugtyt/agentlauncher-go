@@ -32,22 +32,22 @@ func NewAgentRuntime(eb *eventbus.EventBus) *AgentRuntime {
 }
 
 func (r *AgentRuntime) GetAgent(agentID string) (*Agent, bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	agent, exists := r.Agents[agentID]
 	return agent, exists
 }
 
 func (r *AgentRuntime) HandleTaskCreateEvent(ctx context.Context, e events.TaskCreateEvent) {
 	r.eventBus.Emit(events.AgentCreateEvent{
-		AgentID:      AGENT_0_NAME,
+		AgentID:      e.AgentID,
 		Task:         e.Task,
 		Conversation: e.Conversation,
 		SystemPrompt: func() string {
 			if e.SystemPrompt != "" {
 				return e.SystemPrompt
 			}
-			return AGENT_0_SYSTEM_PROMPT
+			return PRIMARY_AGENT_SYSTEM_PROMPT
 		}(),
 		ToolSchemas: e.ToolSchemas,
 	})
@@ -102,7 +102,7 @@ func (r *AgentRuntime) HandleAgentFinishEvent(ctx context.Context, e events.Agen
 			Error:   "Agent not found",
 		})
 	} else {
-		if e.AgentID != AGENT_0_NAME {
+		if !IsPrimaryAgent(e.AgentID) {
 			r.mu.Lock()
 			delete(r.Agents, e.AgentID)
 			r.mu.Unlock()
@@ -139,7 +139,7 @@ func (r *AgentRuntime) HandleAgentLauncherShutdownEvent(ctx context.Context, e e
 }
 
 func (r *AgentRuntime) HandleTaskFinishEvent(ctx context.Context, e events.TaskFinishEvent) {
-	if _, exists := r.GetAgent(e.AgentID); exists && e.AgentID == AGENT_0_NAME {
+	if _, exists := r.GetAgent(e.AgentID); exists && !IsPrimaryAgent(e.AgentID) {
 		r.mu.Lock()
 		delete(r.Agents, e.AgentID)
 		r.mu.Unlock()

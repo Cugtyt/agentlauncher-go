@@ -248,3 +248,10 @@ func RegisterTools(agentLauncher *launcher.AgentLauncher) {
 			},
 		})
 }
+
+func RegisterMessageHandlers(agentLauncher *launcher.AgentLauncher) {
+	agentLauncher.WithConversationHandler(func(messages llminterface.MessageList) llminterface.MessageList {
+		fmt.Println("Response Messages: ", len(messages))
+		return messages
+	})
+}
